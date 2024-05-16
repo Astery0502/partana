@@ -1,0 +1,14 @@
+/figs/
+/.ipynb_checkpoints/
+/demo/.ipynb_checkpoints/
+analysis.ipynb
+colshear_ana.ipynb
+data_analysis.ipynb
+tdm_ana.ipynb
+*.pyc
+tpbase.*
+tpplot.*
+dfdata.*
+particle_csv.*
+get_field.*
+dfdata.*
