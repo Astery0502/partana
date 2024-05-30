@@ -12,3 +12,5 @@ dfdata.*
 particle_csv.*
 get_field.*
 dfdata.*
+*.csv
+*.tar.gz
