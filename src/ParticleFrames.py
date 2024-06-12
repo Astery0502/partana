@@ -398,7 +398,7 @@ class EnsembleFrames:
             if len(dfi.index)==0:
                 print(f"No more data from the index: {index} in the file: {f}")
                 break
-            dfa = dd.concat([dfa, dfi])
+            dfa = dd.concat([dfa.compute(), dfi.compute()])
         dfa = SingPartFrame(dfa)
         return dfa 
     

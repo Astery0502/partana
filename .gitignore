@@ -14,3 +14,7 @@ get_field.*
 dfdata.*
 *.csv
 *.tar.gz
+*.bin
+*.dat
+lo*
+ard
