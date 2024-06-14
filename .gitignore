@@ -1,18 +1,22 @@
+# directories
+.ipynb_checkpoints/
+__pycache__/
 /figs/
-/.ipynb_checkpoints/
-/demo/.ipynb_checkpoints/
-analysis.ipynb
-colshear_ana.ipynb
-data_analysis.ipynb
-tdm_ana.ipynb
-*.pyc
-tpbase.*
-tpplot.*
-dfdata.*
-particle_csv.*
-get_field.*
-dfdata.*
-data/
-RDInfo*
-ard
+
+# files with extensions
+*.j
+*.h5
+*.csv
+*.bin
+*.dat
+*.tar.gz
+
+# all loc[al] files
 loc*
+
+# spared
+get_field.py
+
+# raw data files not remained
+/data/*.csv
+/data/*.h5
