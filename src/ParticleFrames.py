@@ -1,146 +1,361 @@
-import doctest
+import os
 import re
-
-import numpy as np
-import pandas as pd
-import dask.dataframe as dd 
-
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-
+import doctest
 from collections import namedtuple
 from typing import Union, List, Tuple, Callable, Iterable
-from dask.distributed import Client
-import dask.dataframe as dd
+
+import h5py
+import numpy as np
+import pandas as pd
 
 Hists = namedtuple('hists', ['hists', 'midpts'])
-columns_to_extrat = ['time', 'index', 'usrpl01', 'x1', 'x2', 'x3', 'pl04', 'pl05', 'pl06', 'u1', 'dt']
+columns_to_extract = ['time', 'index', 'usrpl01', 'x1', 'x2', 'x3', 'pl04', 'pl05', 'pl06', 'u1', 'dt']
 
-def rebin_val(val: Iterable, bin:int) -> np.ndarray:
-    val = np.array(val)
-    padding_size = (bin - len(val) % bin) % bin
-    padded_data = np.pad(val, (0, padding_size), 'constant')
-    rebinned_val = padded_data.reshape(-1, bin).sum(axis=1)
-    return rebinned_val
+def tail_sorted(filename: str) -> int:
+    """
+    A criteria sorting a file string list depending on their last number 
 
-class ParticleFrame(dd.DataFrame):
+    >>> files = ['a_1.txt', 'a_3.txt', 'a_2.txt']
+    >>> sorted(files, key=tail_sorted)
+    ['a_1.txt', 'a_2.txt', 'a_3.txt']
+    """
+    pattern = r'_(\d+)\.\w+'
+    match = re.search(pattern, filename)
+    if match:
+        num = int(match.groups()[0])
+        return num
+    raise ValueError("No pattern found in the filename") 
 
-    @property
-    def _constructor(self):
-        return ParticleFrame
+def mid_sorted(filename: str) -> int:
+    pattern = r'\w+.*(\d+)_.*\w+.+'
+    match = re.search(pattern, filename)
+    if match:
+        num = int(match.groups()[0]) 
+        return num
+    raise ValueError("No pattern found in the filename") 
 
-    def tp_prep(self) -> None:
+# save all csv files into h5 file, with array and index separately stored into two datasets
+def csvs2h5(csvfiles:Iterable[str], h5path:str):
+
+    # once the file exists, no need to save, add instead recommended
+    if os.path.exists(h5path):
+        print(f"Already Existence of a H5 FILE: {h5path}.")
+        return
+
+    with h5py.File(h5path, 'w') as hdf:
+        for csvfile in csvfiles:
+            # read dataframe from csv file and format the column name
+            dfi = pd.read_csv(csvfile)
+            dfi.columns = dfi.columns.str.replace(' ', '', regex=False)
+
+            # prepare dataset name and save data to the dataset
+            ds_all = re.search(r'_(\d+).csv',csvfile).group(1)
+            ds_index = ds_all+'_index'
+            ds_flag = ds_all+'_flag'
+            hdf.create_dataset(ds_all, data=dfi.to_numpy())
+            hdf.create_dataset(ds_index, data=dfi['index'].to_numpy())
+            hdf.create_dataset(ds_flag, data=dfi['usrpl02'].to_numpy())
+            hdf[ds_all].attrs['columns'] = dfi.columns.to_list()
+
+# Combine all csv files into one hdf5 file; unstructured version
+def csvs2h5_v1(csvfiles:Iterable[str], h5path:str):
+    """
+    'time' 'dt' 'x1' 'x2' 'x3' 'u1' 'u2' 'u3' 
+    'pl01' 'pl02' 'pl03': gyradius, pitch angle, v_perp
+    'pl04' 'pl05' 'pl06' 'pl07': four a_//
+    'pl08' 'pl09' 'pl10' 'pl11' 'pl12' 'pl13' 'pl14': seven v_drift
+    'usrpl01' 'usrpl02' 'usrpl03': Ek, gca/fl, absb
+    'ipe' 'iteration' 'index'
+    """
+    if os.path.exists(h5path):
+        print(f"Already Existence of a H5 FILE: {h5path}.")
+        return
+    with h5py.File(h5path, 'w') as hdf:
+        for csvfile in csvfiles:
+            dfi = pd.read_csv(csvfile)
+            dataset_name = re.search(r'_(\d+).csv',csvfile).group(1)
+            hdf.create_dataset(dataset_name, data=dfi.to_numpy())
+            hdf[dataset_name].attrs['columns'] = [s.replace(" ","") for s in dfi.columns.to_list()]
+
+# save the compound data type of attrs and index
+def csvs2h5_v2(csvfiles:Iterable[str], h5path:str):
+
+    # once the file exists, no need to save, add instead recommended
+    if os.path.exists(h5path):
+        print(f"Already Existence of a H5 FILE: {h5path}.")
+        return
+
+    with h5py.File(h5path, 'w') as hdf:
+        for csvfile in csvfiles:
+            # read dataframe from csv file and format the column name
+            dfi = pd.read_csv(csvfile)
+            dfi.columns = dfi.columns.str.replace(' ', '', regex=False)
+
+            # prepare for the compound data type and data of 2d array attrs and 1d array index
+            row, col = dfi.shape
+            compound_dtype = np.dtype([('attrs', np.float64, (col,)), ('index', np.float64)]) # here we identify the type in the sub array of 2d/1d->1d/scalar
+            cdata = np.zeros(row, dtype=compound_dtype)
+            cdata['attrs'] = dfi.to_numpy()
+            cdata['index'] = dfi['index'].to_numpy()
+
+            # prepare dataset name and save data to the dataset
+            dataset_name = re.search(r'_(\d+).csv',csvfile).group(1)
+            hdf.create_dataset(dataset_name, data=cdata)
+            hdf[dataset_name].attrs['columns'] = [s.replace(" ","") for s in dfi.columns.to_list()]
+
+def get_compound_dtype(df):
+    """
+    Create a compound dtype for the DataFrame.
+    """
+    dtype = []
+    for column in df.columns:
+        if pd.api.types.is_integer_dtype(df[column]):
+            dtype.append((column, 'i4'))
+        elif pd.api.types.is_float_dtype(df[column]):
+            dtype.append((column, 'f4'))
+        elif pd.api.types.is_string_dtype(df[column]):
+            max_len = df[column].str.len().max()
+            dtype.append((column, f'S{max_len}'))
+        else:
+            raise ValueError(f"Unsupported dtype for column {column}")
+    return np.dtype(dtype)
+
+def csvs2h5_structured(csvfiles:Iterable[str], h5path:str):
+    if os.path.exists(h5path):
+        print(f"Already Existence of a H5 FILE: {h5path}.")
+        return
+    with h5py.File(h5path, 'w') as hdf:
+        for csvfile in csvfiles:
+            dfi = pd.read_csv(csvfile)
+            dfi.columns = dfi.columns.str.replace(' ', '', regex=False)
+            dataset_name = re.search(r'_(\d+).csv',csvfile).group(1)
+            compound_dtype = get_compound_dtype(dfi)
+            structured_array = np.zeros(dfi.shape[0], dtype=compound_dtype)
+            for col in dfi.columns:
+                    structured_array[col] = dfi[col].values
+            # Create dataset with compound data type
+            dset = hdf.create_dataset(dataset_name, data=structured_array)
+            # Add column names as attributes
+            dset.attrs['columns'] = dfi.columns.tolist()
+
+# single file to the h5 file
+def csv2h5(csvfile:str, h5path:str):
+    """
+    'time' 'dt' 'x1' 'x2' 'x3' 'u1' 'u2' 'u3' 
+    'pl01' 'pl02' 'pl03': gyradius, pitch angle, v_perp
+    'pl04' 'pl05' 'pl06' 'pl07': four a_//
+    'pl08' 'pl09' 'pl10' 'pl11' 'pl12' 'pl13' 'pl14': seven v_drift
+    'usrpl01' 'usrpl02' 'usrpl03': Ek, gca/fl, absb
+    'ipe' 'iteration' 'index'
+    """
+    if os.path.exists(h5path):
+        print(f"Already Existence of a H5 FILE: {h5path}.")
+        return
+    with h5py.File(h5path, 'w') as hdf:
+        dfi = pd.read_csv(csvfile)
+        dataset_name = "des"# re.search(r'_(destroy).csv',csvfile).group()
+        hdf.create_dataset(dataset_name, data=dfi.to_numpy())
+        hdf[dataset_name].attrs['columns'] = [s.replace(" ","") for s in dfi.columns.to_list()]
+
+class ParticleFrames:
+    """
+    Particle Frames contain multiple snapshot of particles, the number and memory of frames are very large
+    We hereafter operate them with the file: we assume that the frames are all similiar with the same attribute columns
+    """
+    def __init__(self, h5file:str):
+        self.h5 = h5file
+    
+    def __get_first_ds_name(self):
+        def find_first_ds(name, obj):
+            if isinstance(obj, h5py.Dataset):
+                return name        
+        with h5py.File(self.h5, 'r') as hdf:
+            ds1_name = hdf.visititems(find_first_ds)
+        return ds1_name
+
+    def __get_col_shape(self):
         """
-        Preprocess the DataFrame: clean column names and (adjust angles).
-
-        Example:
-        >>> df = ParticleFrame({' x1': [1,2], ' x2': [3,4]})
-        >>> df.columns.tolist()
-        ['x1', 'x2']
+        Get the dataset shape from the datasets, assumed that all datasets
+        have the same shape, which follows the format (part num, attr num)
         """
-        # Clean up column names by removing spaces
-        self.columns = [col.replace(" ","") for col in self.columns]
+        with h5py.File(self.h5, 'r') as file:
+            ds1_name = self.__get_first_ds_name()
+            shape = file[ds1_name].shape
+        return shape[1]
 
-    def __init__(self, data, *args, **kwargs):
-        if isinstance(data, str):
-            data = dd.read_csv(data)
-            data = data.repartition(npartitions=10)
-        elif isinstance(data, pd.DataFrame):
-            data = dd.from_pandas(data, npartitions=10)
-        elif isinstance(data, dict):
-            data = dd.from_pandas(pd.DataFrame(data), npartitions=10)
-        elif isinstance(data, dd.DataFrame):
-            data = data.repartition(npartitions=10)
-        super().__init__(data._expr, *args, **kwargs)
-        self.tp_prep()
+    def __get_dataset_names(self):
+        """
+        Get the all dataset names of the h5 file, note that the dataset names
+        can not be indexed as the data is not compound
+        """
+        dataset_names = []
+
+        def extractor(name, obj):
+            if isinstance(obj, h5py.Dataset):
+                dataset_names.append(name)
+
+        with h5py.File(self.h5, 'r') as file:
+            file.visititems(extractor)
+
+        return dataset_names
+
+    def __get_dataset_namelen(self):
+        first_ds_name = self.__get_first_ds_name()
+        return len(first_ds_name)
+
+    def __get_dataset_cols(self):
+        first_ds_name = self.__get_first_ds_name()
+        with h5py.File(self.h5, 'r') as hdf:
+            cols = hdf[first_ds_name].attrs['columns'].tolist()
+        return cols
+    
+    def get_col_shape(self):
+        if hasattr(self, 'col_shape'):
+            pass
+        else:
+            self.col_shape = self.__get_col_shape()
+        return self.col_shape
+
+    def get_ds_names(self):
+        if hasattr(self, 'ds_names'):
+            pass
+        else:
+            self.ds_names = self.__get_dataset_names()
+        return self.ds_names
+
+    def get_specific_ds_names(self, pattern):
+        ds_names = self.get_ds_names()
+        sds_names = [s for s in ds_names if re.match(pattern, s)]
+        if len(sds_names) > 0:
+            return sds_names
+        else:
+            print("NO SUCH DATASET NAMES")
+    
+    def get_full_ds_names(self):
+        return self.get_specific_ds_names(r'\d+$')
+
+    def get_index_ds_names(self):
+        return self.get_specific_ds_names(r'\d+_index')
+
+    def get_flag_ds_names(self):
+        return self.get_specific_ds_names(r'\d+_flag')
+
+    def get_ds_namelen(self):
+        if hasattr(self, 'ds_namelen'):
+            pass
+        else:
+            self.ds_namelen = self.__get_dataset_namelen()
+        return self.ds_namelen
+
+    def get_ds_cols(self):
+        if hasattr(self, 'ds_cols'):
+            pass
+        else:
+            self.ds_cols = self.__get_dataset_cols()
+        return self.ds_cols
+
+    def num2dsname(self, num: int):
+        namelen = self.get_ds_namelen()
+        return str(num).zfill(namelen)
+
+    def dsname2num(self, name:str):
+        dataset_names = self.get_ds_names()
+        try:
+            index = dataset_names.index(name)
+            return index
+        except ValueError:
+            return -1
+    
+    def col2num(self, name:str):
+        cols = self.get_ds_cols()
+        try:
+            index = cols.index(name)
+            return index
+        except ValueError:
+            return -1
 
     @staticmethod
-    def get_val_range(val:str) -> Callable[[dd.DataFrame,float,float], dd.DataFrame]:
-        def get_val_specified(df:dd.DataFrame, v1:float, v2:float):
-            return df[(df[val]>=v1) & (df[val]<=v2)]
-        return get_val_specified
-    
-    def get_trange(self, v1:float, v2:float) -> dd.DataFrame:
+    def find_approx_index(lst:Iterable[Union[int,float]], target:Union[int,float]):
         """
-        Get particles whose time ranges from v1 to v2        
-
-        Example:
-        >>> df = ParticleFrame({'time':[1,2,3], 'value':[2,3,5]})
-        >>> (df.get_trange(1,2))['time'].compute().tolist()
-        [1, 2]
+        Find the index of the target in an approximately incrementing list.
         """
-        return self.get_val_range('time')(self, v1, v2)
-
-    def get_tuntil(self, v2:float) -> dd.DataFrame:
-        """
-        Get particles whose time ranges until v2
-        """
-        return self.get_trange(0, v2)
-
-    def get_tfrom(self, v1:float) -> dd.DataFrame:
-        """
-        Get particles whose time ranges from v1
-        """
-        return self.get_trange(v1, 10000)
-
-    def get_erange(self, e0:float, e1:float, ev: bool=True) -> dd.DataFrame:
-        """
-        Get particles whose energy ranges from e0 to e1, eV unit by default
-
-        Example:
-        >>> df = ParticleFrame({'usrpl01':[5,7,11], 'value':[1,2,3]})
-        >>> (df.get_erange(7,11,ev=False))['usrpl01'].compute().tolist()
-        [7, 11]
-        """
-        if ev:
-            e0 /= 511
-            e1 /= 511
-        return self.get_val_range('usrpl01')(self,e0,e1)
-
-    def get_indexed(self, indices: Union[int, Iterable[int]]) -> dd.DataFrame:
-        """
-        Get particles whose indices from the indices list or single int
-
-        Example:
-        >>> df = ParticleFrame({'index':[1,2,3], 'value':[1,2,3]})
-        >>> (df.get_indexed([1,5]))['index'].compute().tolist()
-        [1]
-        >>> (df.get_indexed(1))['index'].compute().tolist()
-        [1]
-        """
-        if isinstance(indices, int):
-            return self[self['index'] == indices]
-        return self.loc[self['index'].isin(indices)]
-    
-    def write_csv(self, path:str) -> None:
-        return self.to_csv(path, sep=',', index=False, single_file=True)
-    
-    def get_right(self) -> dd.DataFrame:
-        """
-        Get particles located in the positive x-axis
-
-        Example:
-        >>> df = ParticleFrame({'x1':[-1,-2,3], 'value':[1,2,3]})
-        >>> (df.get_right())['x1'].compute().tolist()
-        [3]
-        """
-        return self.get_val_range('x1')(self,0,10000)
-    
-    def get_left(self) -> dd.DataFrame:
-        """
-        Get particles located in the negative x-axis
-
-        Example:
-        >>> df = ParticleFrame({'x1':[-1,-2,3], 'value':[1,2,3]})
-        >>> (df.get_left())['x1'].compute().tolist()
-        [-1, -2]
-        """
-        return self.get_val_range('x1')(self,-10000,0)
+        indices =  np.where(lst == target)[0]
+        if indices.size == 1:
+            return indices[0]
+        return -1
     
     @staticmethod
-    def get_general_hists(pl:str) -> Callable:
-        def get_specific_hist(df:dd.DataFrame, density:bool=True, log:bool=True, bins:int=True):
-            pldata = df[pl].compute()
+    def find_indices(lst:Iterable[Union[int,float]], target:Union[Union[int,float],Iterable[Union[int,float]]]):
+        mask = np.isin(lst, target)
+        indices = np.nonzero(mask)[0]
+        if indices.size == 0:
+            return -1
+        return indices
+
+    def general_extract(self, pl:str) -> Callable:
+        if isinstance(pl, str):
+            sindex = self.col2num(pl)
+        else:
+            sindex = pl
+        def extract(ds,v1:float,v2:float):
+            assert v2>v1
+            mask = (ds[:,sindex]<v2) & (ds[:,sindex]>v1)
+            return ds[:][np.where(mask)[0]]
+            # here we use the whole dataset to index as the mask indices can be very large leading to inefficient large amount of io read.
+        return extract
+
+    def extract_from_e(self, df, e1:float, e2:float):
+        return self.general_extract('u3')(df, e1, e2)
+    
+    def extract_from_t(self, df, t1:float, t2:float):
+        return self.general_extract('time')(df, t1, t2)
+
+    def extract_from_ke(self, df, ke1:float, ke2:float):
+        return self.general_extract('usrpl01')(df, ke1, ke2)
+
+    def index2singpart(self, index: int):
+        """
+        derive single particle infomation over time (datasets)
+        """
+        dataset_names = self.get_full_ds_names()
+        arr = np.zeros((len(dataset_names), self.get_col_shape()))
+
+        with h5py.File(self.h5, 'r') as hdf:
+            for i,dataset_name in enumerate(dataset_names):
+                ds = hdf[dataset_name]
+                indices = hdf[dataset_name+'_index'][:]
+                lindex = self.find_indices(indices, index)[0]
+                if lindex == -1:
+                    break
+                arr[i,:] = ds[lindex,:]
+        arr = arr[~np.all(arr == 0, axis=1)]
+        return arr
+    
+    def indices2frame(self, indices: Iterable[int]):
+        dataset_names = self.get_full_ds_names()
+        arr = []
+        with h5py.File(self.h5, 'r') as hdf:
+            for i,dataset_name in enumerate(dataset_names):
+                ds = hdf[dataset_name]
+                all_indices = hdf[dataset_name+'_index'][:]
+                lindex = self.find_indices(all_indices, indices)
+                if isinstance(lindex,int):
+                    break
+                arr.append(ds[lindex,:])
+        return np.vstack(arr)
+
+    def extract_frame(self, findex):
+        with h5py.File(self.h5, 'r') as hdf:
+            ds = hdf[self.num2dsname(findex)][:]
+        return ds
+
+    def get_general_hists(self, pl:Union[str,int]) -> Callable:
+        if isinstance(pl, str):
+            sindex = self.col2num(pl)
+        else:
+            sindex = pl
+        def get_specific_hist(df, density:bool=True, log:bool=True, bins:int=True):
+            pldata = df[:,sindex]
             if log:
                 assert all(element >0 for element in pldata)
                 bins = np.logspace(np.log10(pldata.min()),np.log10(pldata.max()),bins)
@@ -150,331 +365,80 @@ class ParticleFrame(dd.DataFrame):
             midpoints = (bins_edges[:-1]+bins_edges[1:])/2
             return Hists(hist, midpoints)
         return get_specific_hist
-    
-    def get_ek_hist(self, hdf:Callable[[dd.DataFrame],dd.DataFrame]=lambda df:df, log:bool=True, bins:int=200) -> Hists:
+
+    def get_ek_hist(self, df, log:bool=True, bins:int=50) -> Hists:
         """
         Get particles histogram
-
-        Example:
-        >>> df = ParticleFrame({'usrpl01':[5,7,11], 'value':[1,2,3]})
-        >>> df.get_ek_hist(bins=3, log=False)
-        hists(hists=array([0.33333333, 0.33333333, 0.33333333]), midpts=array([ 6.,  8., 10.]))
         """
-        return (self.get_general_hists('usrpl01'))(hdf(self),density=True, log=log, bins=bins)
+        return (self.get_general_hists('usrpl01'))(df,density=True, log=log, bins=bins)
 
-class DesPartFrame(ParticleFrame):
-    @property
-    def _constructor(self):
-        return DesPartFrame
+    def extract_frames(self, extractor:Callable, start: int=0, end: int=1, interval: int=1, savpath:str="."):
+        # create new h5 file and name it
+        new_h5_name = os.path.join(savpath, "h5_int_"+str(start)+"_"+str(end)+"_"+str(interval)+".h5")
+        if os.path.exists(new_h5_name):
+            print(f"Already existing {new_h5_name}.")
+            return
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self['hover_text'] = self.apply(lambda row: f"<b>Time:</b> {row['time']}<br>"
-                        f"<b>Index:</b> {row['index']}<br>"
-                        f"<b>Energy:</b> {row['usrpl01']}<br>"
-                        f"<b>X:</b> {row['x1']}<br>"
-                        f"<b>Y:</b> {row['x2']}<br>",
-                        axis=1, meta=('hover_text', 'category'))
+        with h5py.File(new_h5_name, 'w') as hdfw:
+            cols = self.get_ds_cols()
+            dset = hdfw.create_dataset('ds',shape=(0,0),maxshape=(None,None), dtype='float64')
+            dset.attrs['columns'] = cols
+
+        # read from h5_file datasets and load it into the new one
+        ds_names = self.get_full_ds_names()
+        with h5py.File(self.h5, 'r') as hdf:
+            for ds_name in ds_names[start:end:interval]:
+                dsi = extractor(hdf[ds_name])
+                if dsi.shape[0]==0:
+                    print(f"Reach the ParticleFrame with no data: {ds_name}")
+                    break
+                append_to_dataset(new_h5_name, dsi)
+                print(f"complete extract {ds_name} to {new_h5_name}")
     
-    def plot_bottom(self, hdf:Callable[[dd.DataFrame],dd.DataFrame]=lambda df:df) -> None:
+class ParticleFrame:
+    def __init__(self, frame, cols:Iterable) -> None:
+        assert frame.shape[1] == len(cols)
+        self.frame = frame
+        self.cols = cols
 
-        df = hdf(self)
-        df_subset = df[columns_to_extrat+['hover_text']].compute()
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=False, 
-                vertical_spacing=0.1, subplot_titles=('Scatter Plot', 'Histogram'))
-        fig.add_trace(go.Scatter(
-            x=df_subset['x1'],
-            y=df_subset['x2'],
-            mode='markers',
-            marker=dict(
-                color=df_subset['usrpl01']*511,
-                colorscale='Jet',
-                colorbar=dict(title='Ek'),
-            ),
-            text=df_subset['hover_text'],
-            hoverinfo='text',
-            hovertemplate='%{text}<extra></extra>',
-        ), row=1, col=1)
+# function to append data arrays to the first dataset
+def append_to_dataset(h5_path, new_data):
+    pfs = ParticleFrames(h5_path)
+    ds_names = pfs.get_ds_names()
+    with h5py.File(h5_path, 'a') as file:
+        dset = file[ds_names[0]]
+        current_shape = dset.shape
+        num_new_rows, num_new_cols = new_data.shape
 
-        ek_hists = df.get_ek_hist(bins=20)
-        fig.add_trace(go.Scatter(
-            x=511*ek_hists.midpts,
-            y=ek_hists.hists,
-            mode='markers',
-            marker=dict(color='blue')
-        ), row=2, col=1)
+        # Determine the new shape after appending the new data
+        max_rows = current_shape[0] + num_new_rows
+        max_cols = max(current_shape[1], num_new_cols)
+        
+        # Resize the dataset to accommodate the new data
+        dset.resize((max_rows, max_cols))
+        
+        # Write the new data to the end of the dataset
+        dset[current_shape[0]:max_rows, :num_new_cols] = new_data
+                    
 
-        fig.update_xaxes(type="log", row=2, col=1)
-        fig.update_yaxes(type="log", row=2, col=1)
-
-        fig.update_layout(
-            coloraxis_colorbar=dict(
-            x=0.95, y=0.5, len=0.75, thickness=20
-            ),
-            legend=dict(
-            x=1.35, y=1, xanchor='right', yanchor='top'
-            ),
-            title='Bottom Electron Map',
-            xaxis_title='X Axes',
-            yaxis_title='Y Axis',
-        )
-
-        # Update layout with buttons
-        fig.update_layout(
-            width=1000,
-            height=800,
-            updatemenus=[
-            dict(
-            type="buttons",
-            direction="left",
-            pad={"r": 10, "t": 10},
-            showactive=True,
-            x=1.1, xanchor="left",
-            y=1.2, yanchor="top"
-            )
-            ])
-
-        # Update individual subplot titles and axes labels
-        fig.update_xaxes(title_text='X Axis', row=1, col=1)
-        fig.update_yaxes(title_text='Y Axis', row=1, col=1)
-        fig.update_xaxes(title_text='Ek', row=2, col=1)
-        fig.update_yaxes(title_text='Counts', row=2, col=1)
-        fig.show()
-
-class SingPartFrame(ParticleFrame):
-    @property
-    def _constructor(self):
-        return SingPartFrame
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def plot_traj(self, bin: int=1):
-        # Add a hover text column to the DataFrame for the plot: time; index; energy; x1; x2; x3
-        self['hover_text'] = self.apply(lambda row: f"<b>Time:</b> {row['time']}<br>"
-                    f"<b>Index:</b> {row['index']}<br>"
-                    f"<b>Energy:</b> {row['usrpl01']}<br>"
-                    f"<b>X:</b> {row['x1']}<br>"
-                    f"<b>Y:</b> {row['x2']}<br>"
-                    f"<b>Z:</b> {row['x3']}<br>",
-                    axis=1, meta=('hover_text', 'category'))
-        #index = self['index'][0].compute()
-        df_subset = self[columns_to_extrat+['hover_text']].compute()
-        time = df_subset['time'][::bin]
-
-        fig = make_subplots(
-            rows = 1, cols = 2,
-            specs=[[{'type': 'scatter3d'},
-                   {'type': 'scatter'}]],
-            subplot_titles=(f'Trajectory of Particle'),
-
-        )
-
-        fig.add_trace(go.Scatter3d(
-            x = df_subset['x1'][::bin],
-            y = df_subset['x2'][::bin],
-            z = df_subset['x3'][::bin],
-            mode='markers',
-            marker=dict(
-                size=5,
-                color=time,
-                colorscale='Jet',
-                opacity=0.9
-            ),
-            text=df_subset['hover_text'][::bin],
-            hoverinfo='text',
-            hovertemplate='%{text}<extra></extra>',
-            name='Trajectory'
-        ), row=1, col=1)
-
-        # calculate dek values
-        df_subset['dek1'] = df_subset['pl04'] * df_subset['u1'] * df_subset['dt']
-        df_subset['dek2'] = df_subset['pl05'] * df_subset['u1'] * df_subset['dt']
-        df_subset['dek3'] = df_subset['pl06'] * df_subset['u1'] * df_subset['dt']
-        print("dek1:", df_subset['dek1'].sum())
-        print("dek2:", df_subset['dek2'].sum())
-        print("dek3:", df_subset['dek3'].sum())
-
-        # Add the time series scatter plots
-        for i, u in enumerate(['dek1', 'dek2', 'dek3'], start=1):
-            dek = rebin_val(df_subset[u], bin)
-            fig.add_trace(go.Scatter(x=time, y=dek, 
-                        mode='markers',
-                        marker=dict(
-                            size=5,
-                            color=time,
-                            colorscale='Jet',
-                            opacity=0.9
-                            ),
-                        text=self['hover_text'][::bin],
-                        hoverinfo='text',
-                        hovertemplate='%{text}<extra></extra>',
-                        name=f'Curve{i}'
-                        ), row=1, col=2)
-
-        fig.data[1].visible = True
-        fig.data[2].visible = False
-        fig.data[3].visible = False
-        # Create buttons for the layout to toggle the visible trace
-        fig.update_layout(
-            width = 1500,
-            height = 800,
-            updatemenus=[
-                dict(
-                    type="buttons",
-                    direction="right",
-                    x=1.01,
-                    xanchor="left",
-                    y=0.8,
-                    yanchor="top",
-                    buttons=[
-                        dict(label="ep",
-                            method="update",
-                            args=[{"visible": [True, True, False, False]},
-                                {"title": "Time series of Ep"}]),
-                        dict(label="gradb",
-                            method="update",
-                            args=[{"visible": [True, False, True, False]},
-                                {"title": "Time series of Gradb"}]),
-                        dict(label="curvb",
-                            method="update",
-                            args=[{"visible": [True, False, False, True]},
-                                {"title": "Time series of Curvb"}]),
-                    ],
-                )
-            ],
-            # Adjust the domain to make the first subplot larger
-            scene = dict(domain=dict(x=[0,0.50])),
-            xaxis2 = dict(domain=[0.55,1.0]),
-        ) 
-
-        # Update axes titles
-        fig.update_xaxes(title_text='Time', row=1, col=2)
-        fig.update_yaxes(title_text='Value', row=1, col=2)
-
-        fig.show()
-
-class EnsembleFrames:
-
-    def __init__(self, files: Iterable[str]):
-        self.ensemble = files
+def print_item_info(name, obj): 
+    """
+    Visitor function to print information about each item in the HDF5 file.
     
-    # criteria to sort file by the last number before .
-    @staticmethod
-    def tail_sorted(filename: str) -> int:
-        """
-        A criteria sorting a file string list depending on their last number 
+    Parameters:
+    - name (str): The name of the item.
+    - obj (h5py.Group or h5py.Dataset): The item itself.
+    """
+    if isinstance(obj, h5py.Dataset):
+        print(f"Dataset: {name}")
+        print(f"  Shape: {obj.shape}")
+        print(f"  Data type: {obj.dtype}")
+    elif isinstance(obj, h5py.Group):
+        print(f"Group: {name}")
 
-        >>> files = ['a_1.txt', 'a_3.txt', 'a_2.txt']
-        >>> tail_sorted = EnsembleFrames.tail_sorted
-        >>> sorted(files, key=tail_sorted)
-        ['a_1.txt', 'a_2.txt', 'a_3.txt']
-        """
-        pattern = r'_(\d+)\.\w+'
-        match = re.search(pattern, filename)
-        if match:
-            num = int(match.groups()[0])
-            return num
-        raise ValueError("No pattern found in the filename") 
+def extract_h5(h5_file, extractor):
+    with h5py.File(h5_file, 'r') as f:
+        # Use visititems to traverse the file structure
+        f.visititems(extractor)
 
-    @staticmethod
-    def mid_sorted(filename: str) -> int:
-        pattern = r'\w+.*(\d+)_.*\w+.+'
-        match = re.search(pattern, filename)
-        if match:
-            num = int(match.groups()[0]) 
-            return num
-        raise ValueError("No pattern found in the filename") 
-    
-    def derive_single_traj(self, index: int) -> dd.DataFrame:
-        """ 
-        The self.ensemble is supposed to be sorted already.
-        """
-        df = ParticleFrame(self.ensemble[0])
-        dfa = SingPartFrame(pd.DataFrame())
-        for f in self.ensemble:
-            df = ParticleFrame(f)
-            dfi = df.get_indexed(index)
-            if len(dfi.index)==0:
-                print(f"No more data from the index: {index} in the file: {f}")
-                break
-            dfa = dd.concat([dfa.compute(), dfi.compute()])
-        dfa = SingPartFrame(dfa)
-        return dfa 
-    
-    def plot_yproj(self, start: int=0, end: int=-1, interval: int=1, hdf: Callable[[dd.DataFrame],dd.DataFrame]=lambda df: df):
-        """
-        Plot projection along y-axis for files every interval 
-        """
-        t0 = ParticleFrame(self.ensemble[start])['time'].min().compute()
-        t1 = ParticleFrame(self.ensemble[end-1])['time'].max().compute()
-        fig = go.Figure()
-        for f in self.ensemble[start:end:interval]:
-            df = hdf(ParticleFrame(f))
-            if len(df.index)==0:
-                print(f"Reach the ParticleFrame with no data: {f}")
-                break
-            # Create a text column that combines the information
-            df['hover_text'] = df.apply(lambda row: f"<b>Time:</b> {row['time']}<br>"
-                                                f"<b>Index:</b> {row['index']}<br>"
-                                                f"<b>Energy:</b> {row['usrpl01']}<br>"
-                                                f"<b>X:</b> {row['x1']}<br>"
-                                                f"<b>Y:</b> {row['x2']}<br>"
-                                                f"<b>Z:</b> {row['x3']}<br>",
-                                                axis=1, meta=('hover_text', 'object'))                          
-            df_subset = df[columns_to_extrat+['hover_text']].compute()
-            time = df_subset['time'].min()
-            fig.add_trace(go.Scatter(
-                x=df_subset['x1'],
-                y=df_subset['x3'],
-                mode='markers',
-                marker=dict(
-                    color=df_subset['time'],
-                    colorscale='Jet',
-                    colorbar=dict(title='Time'),
-                    cmin=t0, cmax=t1
-                ),
-                text=df_subset['hover_text'],
-                hoverinfo='text',
-                hovertemplate='%{text}<extra></extra>',
-                name=f'Time:{time}'
-            ))
-        fig.update_layout(
-            coloraxis_colorbar=dict(
-                x=0.95, y=0.5, len=0.75, thickness=20
-            ),
-            legend=dict(
-                x=1.35, y=1, xanchor='right', yanchor='top'
-            ),
-            title=f'Scatter Plot of Particles from {start} to {end} with interval: {interval}',
-            xaxis_title='X Axes',
-            yaxis_title='Z Axis',
-        )
-        buttons = [
-            dict(label='Hide', method='restyle',
-                args=[{'visible': ["legendonly"]*(len(fig.data))}]),  # Sets all traces to not visible
-            dict(label='Show', method='restyle',
-                args=[{'visible': ["True"]*len(fig.data)}])   # Sets all traces to visible
-        ]
-        # Update layout with buttons
-        fig.update_layout(
-            width=1000,
-            height=800,
-            updatemenus=[
-                dict(
-                    type="buttons",
-                    direction="left",
-                    buttons=buttons,
-                    pad={"r": 10, "t": 10},
-                    showactive=True,
-                    x=1.1, xanchor="left",
-                    y=1.2, yanchor="top"
-                )
-            ])
-        fig.show()
-
-def doc_main():
-    doctest.testmod(verbose=False)
-
-if __name__ == "__main__":
-    doc_main()
+extract_h5_info = lambda h5_file: extract_h5(h5_file, print_item_info)

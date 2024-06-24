@@ -15,6 +15,7 @@ __pycache__/
 loc*
 
 # spared
+*bak.*
 get_field.py
 
 # raw data files not remained
