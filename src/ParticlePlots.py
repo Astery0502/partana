@@ -19,7 +19,7 @@ class ParticlePlots():
         rebinned_val = padded_data.reshape(-1, bin).sum(axis=1)
         return rebinned_val
 
-    def plot_bottom(self, df, cols:Union[Iterable[str],None]=None):
+    def plot_bottom(self, df, bins:int=10, cols:Union[Iterable[str],None]=None):
         """
         Here we note that the function can only be use for bottom escape particles
         """
@@ -48,8 +48,8 @@ class ParticlePlots():
             hoverinfo='text',
             hovertemplate='%{text}<extra></extra>',
         ), row=1, col=1)
-        fig.update_xaxes(range=[-0.5,0.5], row=1, col=1)
-        ek_hists = ParticleFrames.get_general_hists(ParticleFrames(""),eki)(df, bins=10)
+        fig.update_xaxes(range=[-0.8,0.8], row=1, col=1)
+        ek_hists = ParticleFrames.get_general_hists(ParticleFrames(""),eki)(df, bins=bins)
         fig.add_trace(go.Scatter(
             x=511*ek_hists.midpts,
             y=ek_hists.hists,
@@ -210,7 +210,7 @@ class ParticlePlots():
         """
         Plot projection along y-axis for files every interval 
         """
-        ds_names = pfs.get_ds_names()
+        ds_names = pfs.ds_names
         fig = go.Figure()
         with h5py.File(pfs.h5, 'r') as hdf:
             ti = pfs.col2num('time'); ii = pfs.col2num('index'); eki = pfs.col2num('usrpl01')

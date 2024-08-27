@@ -3,6 +3,7 @@ import re
 import doctest
 from collections import namedtuple
 from typing import Union, List, Tuple, Callable, Iterable
+from functools import cached_property
 
 import h5py
 import numpy as np
@@ -36,7 +37,20 @@ def mid_sorted(filename: str) -> int:
 
 # save all csv files into h5 file, with array and index separately stored into two datasets
 def csvs2h5(csvfiles:Iterable[str], h5path:str):
+    """
+    Transform csv files to a H5 file (ONE CSV ONE DATASET)
 
+    The column name is like:
+
+    'time' 'dt' 'x1' 'x2' 'x3' 'u1' 'u2' 'u3' 
+    'pl01' 'pl02' 'pl03': gyradius, pitch angle, v_perp
+    'pl04' 'pl05' 'pl06' 'pl07': four a_//
+    'pl08' 'pl09' 'pl10' 'pl11' 'pl12' 'pl13' 'pl14': seven v_drift
+    'usrpl01' 'usrpl02' 'usrpl03': Ek, gca/fl, absb
+    'ipe' 'iteration' 'index'
+
+    Here we add extra datasets: index and flag for quick search of INDICES and GOVERNING FUNCTION (>0 the gca, <0 the full lorentz)
+    """
     # once the file exists, no need to save, add instead recommended
     if os.path.exists(h5path):
         print(f"Already Existence of a H5 FILE: {h5path}.")
@@ -48,24 +62,25 @@ def csvs2h5(csvfiles:Iterable[str], h5path:str):
             dfi = pd.read_csv(csvfile)
             dfi.columns = dfi.columns.str.replace(' ', '', regex=False)
 
-            # prepare dataset name and save data to the dataset
-            ds_all = re.search(r'_(\d+).csv',csvfile).group(1)
-            ds_index = ds_all+'_index'
-            ds_flag = ds_all+'_flag'
-            hdf.create_dataset(ds_all, data=dfi.to_numpy())
-            hdf.create_dataset(ds_index, data=dfi['index'].to_numpy())
-            hdf.create_dataset(ds_flag, data=dfi['usrpl02'].to_numpy())
-            hdf[ds_all].attrs['columns'] = dfi.columns.to_list()
+            if 'ensemble' in csvfile:
+                # prepare dataset name and save data to the dataset
+                ds_all = re.search(r'_(\d+).csv',csvfile).group(1)
+                ds_index = ds_all+'_index'
+                ds_flag = ds_all+'_flag'
+                hdf.create_dataset(ds_all, data=dfi.to_numpy())
+                hdf.create_dataset(ds_index, data=dfi['index'].to_numpy())
+                hdf.create_dataset(ds_flag, data=dfi['usrpl02'].to_numpy())
+                hdf[ds_all].attrs['columns'] = dfi.columns.to_list()
+            elif 'destroy' in csvfile:
+                ds_des = 'destroy'
+                hdf.create_dataset(ds_des, data=dfi.to_numpy())
+                hdf[ds_des].attrs['columns'] = dfi.columns.to_list()
+            else:
+                print(f"Unexpected file: {csvfile}.")
 
 # Combine all csv files into one hdf5 file; unstructured version
 def csvs2h5_v1(csvfiles:Iterable[str], h5path:str):
     """
-    'time' 'dt' 'x1' 'x2' 'x3' 'u1' 'u2' 'u3' 
-    'pl01' 'pl02' 'pl03': gyradius, pitch angle, v_perp
-    'pl04' 'pl05' 'pl06' 'pl07': four a_//
-    'pl08' 'pl09' 'pl10' 'pl11' 'pl12' 'pl13' 'pl14': seven v_drift
-    'usrpl01' 'usrpl02' 'usrpl03': Ek, gca/fl, absb
-    'ipe' 'iteration' 'index'
     """
     if os.path.exists(h5path):
         print(f"Already Existence of a H5 FILE: {h5path}.")
@@ -164,26 +179,9 @@ class ParticleFrames:
     """
     def __init__(self, h5file:str):
         self.h5 = h5file
-    
-    def __get_first_ds_name(self):
-        def find_first_ds(name, obj):
-            if isinstance(obj, h5py.Dataset):
-                return name        
-        with h5py.File(self.h5, 'r') as hdf:
-            ds1_name = hdf.visititems(find_first_ds)
-        return ds1_name
 
-    def __get_col_shape(self):
-        """
-        Get the dataset shape from the datasets, assumed that all datasets
-        have the same shape, which follows the format (part num, attr num)
-        """
-        with h5py.File(self.h5, 'r') as file:
-            ds1_name = self.__get_first_ds_name()
-            shape = file[ds1_name].shape
-        return shape[1]
-
-    def __get_dataset_names(self):
+    @cached_property
+    def ds_names(self):
         """
         Get the all dataset names of the h5 file, note that the dataset names
         can not be indexed as the data is not compound
@@ -198,33 +196,47 @@ class ParticleFrames:
             file.visititems(extractor)
 
         return dataset_names
+    
+    @cached_property
+    def ds_name0(self):
+        def find_first_ds(name, obj):
+            if isinstance(obj, h5py.Dataset):
+                return name        
+        with h5py.File(self.h5, 'r') as hdf:
+            first_ds_name = hdf.visititems(find_first_ds)
+        return first_ds_name
 
-    def __get_dataset_namelen(self):
-        first_ds_name = self.__get_first_ds_name()
+    @cached_property
+    def colnum(self):
+        """
+        Get the dataset shape from the datasets, assumed that all datasets
+        have the same shape, which follows the format (part num, attr num)
+        NOTE: REQUIRED TO CHECK ALL COLNUM EQUALS
+        """
+        with h5py.File(self.h5, 'r') as file:
+            first_ds_name = self.ds_name0
+            first_shape = file[first_ds_name].shape
+        return first_shape[1]
+
+    @cached_property
+    def ds_namelen(self):
+        first_ds_name = self.ds_name0
         return len(first_ds_name)
 
-    def __get_dataset_cols(self):
-        first_ds_name = self.__get_first_ds_name()
+    @cached_property
+    def cols(self):
+        first_ds_name = self.ds_name0
         with h5py.File(self.h5, 'r') as hdf:
-            cols = hdf[first_ds_name].attrs['columns'].tolist()
-        return cols
+            ds_cols = hdf[first_ds_name].attrs['columns'].tolist()
+        return ds_cols
     
-    def get_col_shape(self):
-        if hasattr(self, 'col_shape'):
-            pass
-        else:
-            self.col_shape = self.__get_col_shape()
-        return self.col_shape
-
-    def get_ds_names(self):
-        if hasattr(self, 'ds_names'):
-            pass
-        else:
-            self.ds_names = self.__get_dataset_names()
-        return self.ds_names
+    @cached_property
+    def ds_ranges(self):
+        ds_names = self.get_full_ds_names()
+        print(f"Start from {ds_names[0]} to {ds_names[-1]}.")
 
     def get_specific_ds_names(self, pattern):
-        ds_names = self.get_ds_names()
+        ds_names = self.ds_names
         sds_names = [s for s in ds_names if re.match(pattern, s)]
         if len(sds_names) > 0:
             return sds_names
@@ -239,27 +251,20 @@ class ParticleFrames:
 
     def get_flag_ds_names(self):
         return self.get_specific_ds_names(r'\d+_flag')
-
-    def get_ds_namelen(self):
-        if hasattr(self, 'ds_namelen'):
-            pass
+    
+    def get_destroy_name(self):
+        des_name = self.get_specific_ds_names(r'destroy')
+        if len(des_name) > 1:
+            print("More than one destroy file found!")
         else:
-            self.ds_namelen = self.__get_dataset_namelen()
-        return self.ds_namelen
-
-    def get_ds_cols(self):
-        if hasattr(self, 'ds_cols'):
-            pass
-        else:
-            self.ds_cols = self.__get_dataset_cols()
-        return self.ds_cols
-
+            return des_name[0]
+    
     def num2dsname(self, num: int):
-        namelen = self.get_ds_namelen()
+        namelen = self.ds_namelen
         return str(num).zfill(namelen)
 
     def dsname2num(self, name:str):
-        dataset_names = self.get_ds_names()
+        dataset_names = self.ds_names
         try:
             index = dataset_names.index(name)
             return index
@@ -267,7 +272,7 @@ class ParticleFrames:
             return -1
     
     def col2num(self, name:str):
-        cols = self.get_ds_cols()
+        cols = self.cols
         try:
             index = cols.index(name)
             return index
@@ -286,6 +291,9 @@ class ParticleFrames:
     
     @staticmethod
     def find_indices(lst:Iterable[Union[int,float]], target:Union[Union[int,float],Iterable[Union[int,float]]]):
+        """
+        find in the LIST the TARGET, return the boolean array or -1 if not found.
+        """
         mask = np.isin(lst, target)
         indices = np.nonzero(mask)[0]
         if indices.size == 0:
@@ -293,6 +301,9 @@ class ParticleFrames:
         return indices
 
     def general_extract(self, pl:str) -> Callable:
+        """
+        General Extract from one dataset where particles with one column property in selected range.
+        """
         if isinstance(pl, str):
             sindex = self.col2num(pl)
         else:
@@ -315,23 +326,26 @@ class ParticleFrames:
 
     def index2singpart(self, index: int):
         """
-        derive single particle infomation over time (datasets)
+        Extract single particle infomation over time (datasets)
         """
         dataset_names = self.get_full_ds_names()
-        arr = np.zeros((len(dataset_names), self.get_col_shape()))
+        arr = np.zeros((len(dataset_names), self.colnum))
 
         with h5py.File(self.h5, 'r') as hdf:
             for i,dataset_name in enumerate(dataset_names):
                 ds = hdf[dataset_name]
                 indices = hdf[dataset_name+'_index'][:]
-                lindex = self.find_indices(indices, index)[0]
+                lindex = self.find_indices(indices, index)
                 if lindex == -1:
                     break
-                arr[i,:] = ds[lindex,:]
+                arr[i,:] = ds[lindex[0],:]
         arr = arr[~np.all(arr == 0, axis=1)]
         return arr
     
     def indices2frame(self, indices: Iterable[int]):
+        """
+        Extract multiple particle trajectory with index from all frames
+        """
         dataset_names = self.get_full_ds_names()
         arr = []
         with h5py.File(self.h5, 'r') as hdf:
@@ -350,11 +364,12 @@ class ParticleFrames:
         return ds
 
     def get_general_hists(self, pl:Union[str,int]) -> Callable:
+        # General Abstract get histogram from one one 2d array columns, the column is from the h5 column name 
         if isinstance(pl, str):
             sindex = self.col2num(pl)
         else:
             sindex = pl
-        def get_specific_hist(df, density:bool=True, log:bool=True, bins:int=True):
+        def get_specific_hist(df, density:bool=True, log:bool=True, bins:int=50):
             pldata = df[:,sindex]
             if log:
                 assert all(element >0 for element in pldata)
@@ -380,7 +395,7 @@ class ParticleFrames:
             return
 
         with h5py.File(new_h5_name, 'w') as hdfw:
-            cols = self.get_ds_cols()
+            cols = self.cols
             dset = hdfw.create_dataset('ds',shape=(0,0),maxshape=(None,None), dtype='float64')
             dset.attrs['columns'] = cols
 
@@ -395,6 +410,14 @@ class ParticleFrames:
                 append_to_dataset(new_h5_name, dsi)
                 print(f"complete extract {ds_name} to {new_h5_name}")
     
+    def extract_destroy(self):
+        """
+        Extract DESTROY particle frame to a NUMPY array
+        """
+        with h5py.File(self.h5, 'r') as hdf:
+            ds_des = hdf[self.get_destroy_name()][:]
+        return ds_des
+
 class ParticleFrame:
     def __init__(self, frame, cols:Iterable) -> None:
         assert frame.shape[1] == len(cols)
@@ -404,7 +427,7 @@ class ParticleFrame:
 # function to append data arrays to the first dataset
 def append_to_dataset(h5_path, new_data):
     pfs = ParticleFrames(h5_path)
-    ds_names = pfs.get_ds_names()
+    ds_names = pfs.ds_names
     with h5py.File(h5_path, 'a') as file:
         dset = file[ds_names[0]]
         current_shape = dset.shape
