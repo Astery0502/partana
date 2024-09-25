@@ -1,6 +1,5 @@
 import os
 import re
-import doctest
 from collections import namedtuple
 from typing import Union, List, Tuple, Callable, Iterable
 from functools import cached_property
@@ -8,6 +7,7 @@ from functools import cached_property
 import h5py
 import numpy as np
 import pandas as pd
+import pyvista as pv
 
 Hists = namedtuple('hists', ['hists', 'midpts'])
 columns_to_extract = ['time', 'index', 'usrpl01', 'x1', 'x2', 'x3', 'pl04', 'pl05', 'pl06', 'u1', 'dt']
@@ -171,6 +171,13 @@ def csv2h5(csvfile:str, h5path:str):
         dataset_name = "des"# re.search(r'_(destroy).csv',csvfile).group()
         hdf.create_dataset(dataset_name, data=dfi.to_numpy())
         hdf[dataset_name].attrs['columns'] = [s.replace(" ","") for s in dfi.columns.to_list()]
+
+# Extract vtk points to csv particle initial postions
+def vtkpoints2csv(vtk_in:str, csv_out:str):
+    mesh = pv.read(vtk_in)
+    np.savetxt(csv_out, mesh.points, delimiter=' ')
+    return mesh
+
 
 class ParticleFrames:
     """
