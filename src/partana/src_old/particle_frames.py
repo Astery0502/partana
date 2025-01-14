@@ -1,12 +1,13 @@
 import os
 import re
 from collections import namedtuple
-from typing import Union, List, Tuple, Callable, Iterable
+from typing import Union, Callable, Iterable
 from functools import cached_property
 
 import h5py
 import numpy as np
 import pandas as pd
+from scipy.interpolate import splprep, splev
 import pyvista as pv
 
 Hists = namedtuple('hists', ['hists', 'midpts'])
@@ -178,6 +179,48 @@ def vtkpoints2csv(vtk_in:str, csv_out:str):
     np.savetxt(csv_out, mesh.points, delimiter=' ')
     return mesh
 
+def points2lines(points, point_data, sample_points=0):
+
+    """ transform points to line-like points array """
+
+    if (np.all(point_data % 1 == 0)):
+        mark = -1
+        start_indices = []
+        for i, pd in enumerate(point_data):
+            if ((mark == -1) or (pd != mark)) and (pd != 0):
+                mark = pd
+                start_indices.append(i)
+        start_indices = np.array(start_indices, dtype=int)
+    else:
+        start_indices = np.array(np.where(point_data == 0)[0], dtype=int)
+
+    lines = []
+
+    for i in range(len(start_indices)):
+        if i == len(start_indices) - 1:
+            line = points[start_indices[i]:]
+        else:
+            line = points[start_indices[i]:start_indices[i+1]]
+
+        if sample_points > len(line) and sample_points>0:
+            # line = np.unique(line, axis=0)
+            tck, u = splprep([line[:,0], line[:,1], line[:,2]], s=0) 
+
+            unew = np.linspace(0, 1, sample_points)
+            out = splev(unew, tck)
+            lines.append(out)
+        else:
+            lines.append(line.T)
+
+    return lines
+
+def vtk2lines(vtk, sample_points:int = 0):
+
+    vtkpoints = pv.read(vtk)
+    points = vtkpoints.points
+    point_data = vtkpoints.point_data['colorVar']
+
+    return points2lines(points, point_data, sample_points)
 
 class ParticleFrames:
     """

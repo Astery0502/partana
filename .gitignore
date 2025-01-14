@@ -1,25 +1,14 @@
-# directories
+# cached directories
 .ipynb_checkpoints/
 __pycache__/
-/figs/
 
 # files with extensions
-*.j
 *.h5
 *.vtk
 *.vtu
 *.csv
 *.bin
 *.dat
-*.tar.gz
 
 # all loc[al] files
 loc*
-
-# spared
-*bak.*
-get_field.py
-
-# raw data files not remained
-/data/*.csv
-/data/*.h5
